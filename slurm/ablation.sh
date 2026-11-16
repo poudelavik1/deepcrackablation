@@ -16,6 +16,7 @@
 #   bash slurm/ablation.sh screen --only 'opt_*' ref      # a subset of variants (globs)
 #   PLAN=configs/ablation/<model>.yaml bash slurm/ablation.sh ...   # another model's plan
 # With PACK=n a job asks for n x CPUS_PER_RUN CPUs (default 8) and n x MEM_PER_RUN_GB memory (default 24).
+# Nothing is submitted while tasks of an earlier ablation array still wait in the queue (FORCE=1 overrides).
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -23,11 +24,29 @@ cd "$(dirname "$0")/.."
 source slurm/env.sh
 export PATH="$ENV_DIR/bin:$PATH"
 STAGE="${1:-}"
-[ -n "$STAGE" ] || { sed -n '2,18p' "$0"; exit 1; }
+[ -n "$STAGE" ] || { sed -n '2,19p' "$0"; exit 1; }
 shift
 PLAN="${PLAN:-configs/ablation/deepcrack.yaml}"
 PACK="${PACK:-1}"
 ABLATION=(python scripts/ablation.py --plan "$PLAN" --runs-root "$RUNS_ROOT")
+
+# One waiting array at a time: a second one would queue the same runs again, and the older one
+# (e.g. unpacked) would usually start first. Running tasks do not count: the job list leaves out
+# runs in progress, so switching to PACK=2 only needs `scancel --state=PENDING <old id>`.
+if [ "$STAGE" != "check" ] && [ "$STAGE" != "report" ] && [ "${FORCE:-0}" != "1" ] && [ "${DRY_RUN:-0}" != "1" ] \
+        && command -v squeue > /dev/null; then
+    if [ "$STAGE" = "test" ]; then NAME=ablation_test; else NAME=ablation; fi
+    WAITING=$(squeue -u "${USER:-$(id -un)}" -h -t PENDING -n "$NAME" -o "  %i  (%r)" 2> /dev/null || true)
+    if [ -n "$WAITING" ]; then
+        echo "Not submitted: tasks of an earlier '$NAME' array are still waiting in the queue:" >&2
+        echo "$WAITING" >&2
+        echo "A second array would queue the same runs again. Cancel the waiting tasks first" >&2
+        echo "(a task that is running keeps running, and its run is left out of the new list):" >&2
+        echo "    scancel --state=PENDING <job id>" >&2
+        echo "then run this command again, or submit anyway with FORCE=1." >&2
+        exit 1
+    fi
+fi
 
 case "$STAGE" in
     check|report) exec "${ABLATION[@]}" "$STAGE" "$@" ;;
