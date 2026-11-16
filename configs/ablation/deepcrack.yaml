@@ -1,0 +1,80 @@
+# Ablation of DeepCrack: data augmentation and optimizer. Read by scripts/ablation.py.
+#
+# Stage 1 "screen"  Every variant changes ONE thing of the benchmark protocol (configs/base.yaml +
+#                   configs/deepcrack.yaml) and is trained with seed 0; the reference with seeds 0 1 2,
+#                   which also measures the seed noise.
+# Stage 2 "combine" Changes that beat the reference mean by at least the margin are merged: the best
+#                   optimizer with the top-1, top-3 and all positive augmentation changes.
+# Stage 3 "final"   The best candidates get seeds 1 and 2. The best of them over three seeds, tested
+#                   against the reference (Wilcoxon on per-tile val IoU), is the final recipe.
+#
+# Selection uses validation only: val IoU at the threshold with the best pooled F1 on val (as in the
+# benchmark). Every run is 80 epochs with early stopping, like the benchmark (~1.1 h for DeepCrack).
+
+config: deepcrack.yaml             # benchmark config of the model (under configs/)
+protocol: ablation_deepcrack       # results: $RUNS_ROOT/ablation_deepcrack/<variant>/seed_<n>
+reference_seeds: [0, 1, 2]
+screen_seed: 0
+final_seeds: [1, 2]                # added to seed 0 of each confirmed candidate
+final_candidates: 2                # how many candidates get the extra seeds
+margin: 0.003                      # min. val IoU gain over the reference mean to count a change as positive
+                                   # (raised to the reference seed std when that is larger)
+hours_per_run: 1.1                 # for the time estimate only (benchmark v1: 68-77 epochs x 54 s on the A6000)
+
+reference:
+  change: "Benchmark protocol: AdamW lr 3e-4, benchmark augmentation"
+
+# Optimizer arm: each optimizer on a 3-point learning-rate grid (half a decade apart) around its usual
+# value, with the benchmark augmentation. Everything else (warm-up + cosine, grad clip 1.0, EMA, batch 16,
+# 80 epochs) stays fixed. weight_decay defaults to train.weight_decay (1e-4).
+optimizers:
+  adamw:   {lrs: [1.0e-4, 3.0e-4, 1.0e-3], label: AdamW}     # 3e-4 is the reference itself
+  adam:    {lrs: [1.0e-4, 3.0e-4, 1.0e-3], label: Adam}      # L2 in the gradient instead of decoupled decay
+  nadam:   {lrs: [1.0e-4, 3.0e-4, 1.0e-3], label: NAdam}
+  radam:   {lrs: [1.0e-4, 3.0e-4, 1.0e-3], label: RAdam}
+  adamax:  {lrs: [3.0e-4, 1.0e-3, 3.0e-3], label: Adamax}    # torch default 2e-3
+  rmsprop: {lrs: [3.0e-5, 1.0e-4, 3.0e-4], label: RMSprop}
+  adagrad: {lrs: [3.0e-3, 1.0e-2, 3.0e-2], label: Adagrad}   # torch default 1e-2
+  sgd:     {lrs: [3.0e-3, 1.0e-2, 3.0e-2], label: SGD (Nesterov), args: {momentum: 0.9, nesterov: true}}
+  lion:    {lrs: [3.0e-5, 1.0e-4, 3.0e-4], label: Lion, weight_decay: 3.0e-4}   # paper: 3-10x lower lr, higher decay
+
+# Augmentation arm: AdamW lr 3e-4. `set` overrides the aug section of base.yaml. Variants with the same
+# factor are alternatives (at most one per factor goes into a combination). Factor "none" is only a
+# reference point and is never combined.
+augmentations:
+  aug_none:
+    factor: none
+    change: "No augmentation (crack-biased crop only)"
+    set: {flip: false, rotate90: false, affine_p: 0, brightness_contrast_p: 0, hsv_p: 0, blur_noise_p: 0}
+  # -- leave one benchmark step out
+  aug_no_flip:          {factor: flip, change: "- horizontal/vertical flips", set: {flip: false}}
+  aug_no_rotate90:      {factor: rotate90, change: "- 90-degree rotations", set: {rotate90: false}}
+  aug_no_affine:        {factor: affine, change: "- affine (scale 0.9-1.1, rotation 15 deg)", set: {affine_p: 0}}
+  aug_no_brightness:    {factor: brightness_contrast, change: "- brightness/contrast", set: {brightness_contrast_p: 0}}
+  aug_no_hsv:           {factor: hsv, change: "- hue/saturation/value", set: {hsv_p: 0}}
+  aug_no_blur_noise:    {factor: blur_noise, change: "- Gaussian blur/noise", set: {blur_noise_p: 0}}
+  # -- a benchmark step made stronger, or changed
+  aug_affine_strong:
+    factor: affine
+    change: "Affine stronger (p 0.5, scale 0.75-1.33, rotation 45 deg)"
+    set: {affine_p: 0.5, affine_scale: [0.75, 1.33], affine_rotate: [-45, 45]}
+  aug_brightness_strong:
+    factor: brightness_contrast
+    change: "Brightness/contrast stronger (limits 0.3)"
+    set: {brightness_limit: 0.3, contrast_limit: 0.3}
+  aug_random_crop:      {factor: crop, change: "Uniform random crop instead of crack-biased crop", set: {crop: random}}
+  # -- one step added to the benchmark augmentation
+  aug_elastic:          {factor: elastic, change: "+ elastic deformation (p 0.25)", set: {elastic_p: 0.25}}
+  aug_grid_distortion:  {factor: grid_distortion, change: "+ grid distortion (p 0.25)", set: {grid_distortion_p: 0.25}}
+  aug_perspective:      {factor: perspective, change: "+ perspective (p 0.25)", set: {perspective_p: 0.25}}
+  aug_clahe:            {factor: clahe, change: "+ CLAHE (p 0.25)", set: {clahe_p: 0.25}}
+  aug_gamma:            {factor: gamma, change: "+ random gamma (p 0.3)", set: {gamma_p: 0.3}}
+  aug_shadow:           {factor: shadow, change: "+ random shadow (p 0.25)", set: {shadow_p: 0.25}}
+  aug_gray:             {factor: gray, change: "+ grayscale (p 0.2)", set: {gray_p: 0.2}}
+  aug_sharpen:          {factor: sharpen, change: "+ sharpen (p 0.2)", set: {sharpen_p: 0.2}}
+  aug_motion_blur:      {factor: motion_blur, change: "+ motion blur (p 0.2)", set: {motion_blur_p: 0.2}}
+  aug_downscale:        {factor: downscale, change: "+ downscale 0.5-0.9 (p 0.2)", set: {downscale_p: 0.2}}
+  aug_iso_noise:        {factor: iso_noise, change: "+ ISO sensor noise (p 0.2)", set: {iso_noise_p: 0.2}}
+  aug_jpeg:             {factor: jpeg, change: "+ JPEG compression q 50-95 (p 0.3)", set: {jpeg_p: 0.3}}
+  aug_dropout:          {factor: dropout, change: "+ coarse dropout, mask cleared (p 0.3)", set: {dropout_p: 0.3}}
+  aug_cutmix:           {factor: cutmix, change: "+ CutMix within the batch (p 0.5)", set: {cutmix_p: 0.5}}

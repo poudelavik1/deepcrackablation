@@ -4,6 +4,8 @@
     python evaluate.py --split test                # once, at the end (needs the val results)
     python evaluate.py --split val --models unet_r34 --seeds 0
     python evaluate.py --split val --model nnunet --seed 0 --predictions-dir <dir>   # external model
+    python evaluate.py --split val --config <run config> --seed 0   # exactly the run train.py writes for it
+    python evaluate.py --split val --protocol ablation_deepcrack    # ablation variants (folder = variant)
 
 Per run it writes, under <run>/eval/:
     <split>_metrics.json    pooled metrics, AP, chosen threshold, tolerance F1, clDice
@@ -47,7 +49,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-unfinished", action="store_true", help="Also evaluate runs without FINISHED")
     parser.add_argument("--no-efficiency", action="store_true", help="Skip params / FLOPs / timing")
     parser.add_argument("--model", default=None, help="With --predictions-dir: registry name of the external model")
-    parser.add_argument("--seed", type=int, default=0, help="With --predictions-dir: seed label")
+    parser.add_argument("--seed", type=int, default=0, help="With --predictions-dir or --config: seed of the run")
+    parser.add_argument("--config", default=None,
+                        help="Evaluate only the run that `train.py --config <this> --seed <n>` writes (no efficiency)")
     parser.add_argument("--predictions-dir", default=None,
                         help="Folder of 8-bit probability PNGs named <tile>.png (in <dir>/<split>/ or <dir>/)")
     return parser.parse_args()
@@ -248,10 +252,41 @@ def load_threshold(out: Path) -> int:
     return int(json.loads(path.read_text(encoding="utf-8"))["threshold_index"])
 
 
-def header_for(name: str, seed: int, protocol: str) -> dict[str, Any]:
+def header_for(name: str, seed: int, protocol: str, run_name: str | None = None) -> dict[str, Any]:
     spec = get_spec(name)
-    return {"model": name, "seed": seed, "protocol": protocol, "family": spec.family, "tier": spec.tier,
-            "label": spec.label}
+    header = {"model": name, "seed": seed, "protocol": protocol, "family": spec.family, "tier": spec.tier,
+              "label": spec.label}
+    if run_name and run_name != name:
+        header["run_name"] = run_name
+    return header
+
+
+def registry_name(run: Path) -> str | None:
+    """Model of a run: its folder name, or for an ablation variant the model in its config.yaml."""
+    if run.parent.name in REGISTRY:
+        return run.parent.name
+    path = run / "config.yaml"
+    if path.exists():
+        model = (cfg.load_yaml(path) or {}).get("model")
+        if model in REGISTRY:
+            return model
+    return None
+
+
+def evaluate_run(run: Path, name: str, seed: int, args: argparse.Namespace, root: Path, workers: int) -> None:
+    """Score one run on args.split (skipped when already done, unless --overwrite)."""
+    out = run / "eval"
+    if (out / f"{args.split}_metrics.json").exists() and not args.overwrite:
+        print(f"[skip] {run.parent.name} seed {seed} {args.split}: already evaluated (use --overwrite)")
+        return
+    threshold = None if args.split == "val" else load_threshold(out)
+    started = time.time()
+    config, tiles = predict_run(run, args.split, root, workers)
+    result = score(tiles, args.split, list(config["eval"]["tolerances"]), threshold)
+    write_results(result, out, header_for(name, seed, config.get("protocol", args.protocol), run.parent.name))
+    print(f"[ok] {run.parent.name} seed {seed} {args.split}: IoU {result['metrics']['iou']:.4f} "
+          f"F1 {result['metrics']['f1']:.4f} AP {result['ap']:.4f} @ threshold {result['threshold']:.3f} "
+          f"({time.time() - started:.0f}s)", flush=True)
 
 
 def main() -> int:
@@ -278,33 +313,31 @@ def main() -> int:
               f"F1 {result['metrics']['f1']:.4f} @ threshold {result['threshold']:.3f}")
         return 0
 
+    if args.config:
+        config = cfg.load_config(args.config)
+        run = cfg.run_dir(runs, config["protocol"], config.get("run_name") or config["model"], args.seed)
+        if not (run / "best.pt").exists():
+            raise SystemExit(f"No best.pt in {run}: train it first")
+        evaluate_run(run, config["model"], args.seed, args, root, workers)
+        return 0
+
     base = runs / args.protocol
     candidates = sorted(p for p in base.glob("*/seed_*") if (p / "best.pt").exists()) if base.is_dir() else []
     failures = 0
     done_models: set[str] = set()
     for run in candidates:
-        name, seed = run.parent.name, int(run.name.split("_")[1])
-        if (args.models and name not in args.models) or (args.seeds is not None and seed not in args.seeds):
+        folder, seed = run.parent.name, int(run.name.split("_")[1])
+        if (args.models and folder not in args.models) or (args.seeds is not None and seed not in args.seeds):
             continue
-        if name not in REGISTRY:
-            print(f"[skip] {name}: not in the registry")
+        name = registry_name(run)
+        if name is None:
+            print(f"[skip] {folder}: not in the registry")
             continue
         if not (run / "FINISHED").exists() and not args.include_unfinished:
-            print(f"[skip] {name} seed {seed}: training not finished")
+            print(f"[skip] {folder} seed {seed}: training not finished")
             continue
-        out = run / "eval"
         try:
-            if (out / f"{args.split}_metrics.json").exists() and not args.overwrite:
-                print(f"[skip] {name} seed {seed} {args.split}: already evaluated (use --overwrite)")
-            else:
-                threshold = None if args.split == "val" else load_threshold(out)
-                started = time.time()
-                config, tiles = predict_run(run, args.split, root, workers)
-                result = score(tiles, args.split, list(config["eval"]["tolerances"]), threshold)
-                write_results(result, out, header_for(name, seed, args.protocol))
-                print(f"[ok] {name} seed {seed} {args.split}: IoU {result['metrics']['iou']:.4f} "
-                      f"F1 {result['metrics']['f1']:.4f} AP {result['ap']:.4f} @ threshold {result['threshold']:.3f} "
-                      f"({time.time() - started:.0f}s)", flush=True)
+            evaluate_run(run, name, seed, args, root, workers)
             efficiency_path = run.parent / "efficiency.json"
             if not args.no_efficiency and name not in done_models and (args.overwrite or not efficiency_path.exists()):
                 efficiency = measure_efficiency(name, {})

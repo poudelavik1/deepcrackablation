@@ -28,5 +28,10 @@ echo "task   : $MODEL seed $SEED ($CONFIG)"
 # Run in the batch step (not srun): since Slurm 22.05 an srun step ignores --cpus-per-task.
 python -u train.py --config "$CONFIG" --seed "$SEED" --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT" ${TRAIN_ARGS:-}
 STATUS=$?
+# EVAL_AFTER=1 (slurm/ablation.sh): score this run on val right away (threshold chosen on val).
+if [ "$STATUS" -eq 0 ] && [ "${EVAL_AFTER:-0}" = "1" ]; then
+    python -u evaluate.py --split val --config "$CONFIG" --seed "$SEED" --data-root "$DATA_ROOT" --runs-root "$RUNS_ROOT"
+    STATUS=$?
+fi
 echo "===== finished $(date) | exit $STATUS ====="
 exit $STATUS

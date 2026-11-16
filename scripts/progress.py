@@ -26,7 +26,7 @@ import config as cfg  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runs-root", default=os.environ.get("RUNS_ROOT"))
-    parser.add_argument("--protocol", default="benchmark", choices=("benchmark", "original"))
+    parser.add_argument("--protocol", default="benchmark", help="benchmark | original | ablation_deepcrack")
     args = parser.parse_args()
 
     root = cfg.runs_root(args.runs_root) / args.protocol

@@ -30,6 +30,7 @@ import engine
 import metrics
 from losses import build_loss, split_outputs
 from models import build_model, get_spec
+from optimizers import build_optimizer
 
 HISTORY_FIELDS = ["epoch", "lr", "train_loss", "train_iou", "train_f1", "val_loss", "val_iou", "val_f1",
                   "val_precision", "val_recall", "seconds", "batch_size", "accum_steps"]
@@ -62,7 +63,7 @@ def make_optimizer(model: torch.nn.Module, config: dict[str, Any]) -> torch.opti
         ]
     else:
         groups = [{"params": list(model.parameters()), "lr": train["lr"]}]
-    return torch.optim.AdamW(groups, lr=train["lr"], weight_decay=train["weight_decay"])
+    return build_optimizer(groups, train)   # train.optimizer, AdamW in the benchmark
 
 
 def make_scheduler(optimizer: torch.optim.Optimizer, config: dict[str, Any]) -> torch.optim.lr_scheduler.LambdaLR:
@@ -81,18 +82,44 @@ def make_scheduler(optimizer: torch.optim.Optimizer, config: dict[str, Any]) -> 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
+def cutmix(images: torch.Tensor, masks: torch.Tensor, p: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """CutMix for segmentation: with probability p per sample, a box of another tile in the
+    batch (image and mask together) replaces the same box. Box area ~ U(0, 1) of the crop.
+    Random numbers come from the seeded CPU generator, so runs stay reproducible."""
+    count, _, height, width = images.shape
+    if count < 2 or p <= 0:
+        return images, masks
+    chosen = (torch.rand(count) < p).nonzero().flatten().tolist()
+    if not chosen:
+        return images, masks
+    images, masks = images.clone(), masks.clone()
+    sources = torch.randperm(count).tolist()
+    for index in chosen:
+        source = sources[index] if sources[index] != index else (index + 1) % count
+        side = float(torch.rand(1)) ** 0.5            # box side ratio; area ratio ~ U(0, 1)
+        box_h, box_w = max(1, round(height * side)), max(1, round(width * side))
+        top = int(torch.randint(0, height - box_h + 1, (1,)))
+        left = int(torch.randint(0, width - box_w + 1, (1,)))
+        images[index, :, top:top + box_h, left:left + box_w] = images[source, :, top:top + box_h, left:left + box_w]
+        masks[index, :, top:top + box_h, left:left + box_w] = masks[source, :, top:top + box_h, left:left + box_w]
+    return images, masks
+
+
 def train_one_epoch(model, loader, loss_fn, optimizer, scaler, device, config, epoch, ema, accum_steps) -> dict[str, float]:
     model.train()
     amp = bool(config["train"]["amp"])
     clip = float(config["train"].get("grad_clip", 0) or 0)
     epochs = int(config["train"]["epochs"])
     threshold = float(config["eval"]["threshold"])
+    cutmix_p = float(config["aug"].get("cutmix_p", 0) or 0)
     total_loss, batches, skipped = 0.0, 0, 0
     tp = fp = fn = 0.0
     optimizer.zero_grad(set_to_none=True)
     for step, batch in enumerate(loader):
         images = batch["image"].to(device, non_blocking=True)
         masks = batch["mask"].to(device, non_blocking=True)
+        if cutmix_p > 0:
+            images, masks = cutmix(images, masks, cutmix_p)
         with engine.autocast(device, amp):
             outputs = model(images)
         progress = (epoch + step / max(1, len(loader))) / epochs
@@ -188,7 +215,7 @@ def main() -> int:
     config["seed"] = args.seed
     config["model_info"] = {"family": spec.family, "tier": spec.tier, "label": spec.label}
 
-    out = cfg.run_dir(cfg.runs_root(args.runs_root), config["protocol"], name, args.seed)
+    out = cfg.run_dir(cfg.runs_root(args.runs_root), config["protocol"], config.get("run_name") or name, args.seed)
     out.mkdir(parents=True, exist_ok=True)
     finished, last_path, best_path, history_path = out / "FINISHED", out / "last.pt", out / "best.pt", out / "history.csv"
     if finished.exists() and not args.force:

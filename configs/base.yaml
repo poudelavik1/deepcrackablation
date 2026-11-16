@@ -2,8 +2,9 @@
 # (and, if it does not fit the GPU, a smaller batch with gradient accumulation).
 # Ablations later: add a config that overrides the section under study; no code changes.
 
-protocol: benchmark          # output goes to $RUNS_ROOT/<protocol>/<model>/seed_<n>
+protocol: benchmark          # output goes to $RUNS_ROOT/<protocol>/<run_name>/seed_<n>
 model: null                  # registry name, set by the per-model config
+run_name: null               # folder of the run; null = the model name (ablations name their variants)
 
 data:
   crop_size: 256             # training crop (tiles smaller than this are padded)
@@ -25,12 +26,30 @@ aug:                         # one fixed setting for all models
   contrast_limit: 0.15
   hsv_p: 0.3
   blur_noise_p: 0.15
+  crop: crack                # crack: crop with a crack in it when the tile has one | random: uniform random crop
+  # Off in the benchmark; studied in configs/ablation/ (probabilities, 0 = not used).
+  elastic_p: 0
+  grid_distortion_p: 0
+  perspective_p: 0
+  clahe_p: 0
+  gamma_p: 0
+  motion_blur_p: 0
+  jpeg_p: 0
+  shadow_p: 0
+  dropout_p: 0               # coarse dropout: the mask is cleared where the image is
+  downscale_p: 0
+  iso_noise_p: 0
+  sharpen_p: 0
+  gray_p: 0
+  cutmix_p: 0                # per sample: paste a box (image and mask) from another tile of the batch
 
 train:
   epochs: 80
   batch_size: 16             # per optimizer step: batch_size * accum_steps is the effective batch
   accum_steps: 1
   eval_batch_size: 16
+  optimizer: adamw           # sgd | adam | adamw | nadam | radam | adamax | rmsprop | adagrad | lion
+  optimizer_args: {}         # extra keyword arguments, e.g. {momentum: 0.9, nesterov: true} for sgd
   lr: 3.0e-4
   weight_decay: 1.0e-4
   warmup_epochs: 2           # linear warm-up, then cosine to lr * min_lr_ratio

@@ -109,16 +109,37 @@ def subsample(items: list, limit: int) -> list:
 # --------------------------------------------------------------------------- #
 # Augmentation
 # --------------------------------------------------------------------------- #
+def _transform(cls, p: float, *alternatives: dict[str, Any]):
+    """`cls(p=p, **options)` with the first option set this albumentations version accepts.
+
+    Several transforms renamed their arguments between 1.4 and 2.x (the server and the
+    laptop may differ), so each new-style set is followed by its old-style equivalent.
+    """
+    import inspect
+
+    known = set(inspect.signature(cls.__init__).parameters)
+    for options in alternatives or ({},):
+        if set(options) <= known:
+            return cls(p=p, **options)
+    raise TypeError(f"{cls.__name__}: no argument set fits this albumentations version ({sorted(known)})")
+
+
 def build_train_transform(config: dict[str, Any], seed: int | None = None):
-    """Geometric + mild photometric augmentation shared by all models."""
+    """Geometric + mild photometric augmentation shared by all models.
+
+    The benchmark uses flips, 90-degree rotations, a mild affine, brightness/contrast, HSV and
+    light blur/noise. The steps after those are off (p = 0) in the benchmark and exist for the
+    augmentation ablation; CutMix works on the batch and is applied in train.py.
+    """
     import albumentations as A
 
     aug, crop = config["aug"], int(config["data"]["crop_size"])
-    steps: list[Any] = [
-        A.PadIfNeeded(min_height=crop, min_width=crop, border_mode=cv2.BORDER_REFLECT_101),
+    steps: list[Any] = [A.PadIfNeeded(min_height=crop, min_width=crop, border_mode=cv2.BORDER_REFLECT_101)]
+    if aug.get("crop", "crack") == "random":
+        steps.append(A.RandomCrop(height=crop, width=crop))
+    else:
         # Large photos are mostly background: keep a crack in the crop when there is one.
-        A.CropNonEmptyMaskIfExists(height=crop, width=crop),
-    ]
+        steps.append(A.CropNonEmptyMaskIfExists(height=crop, width=crop))
     if aug.get("flip", True):
         steps += [A.HorizontalFlip(p=0.5), A.VerticalFlip(p=0.5)]
     if aug.get("rotate90", True):
@@ -133,6 +154,46 @@ def build_train_transform(config: dict[str, Any], seed: int | None = None):
         steps.append(A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=15, val_shift_limit=10, p=aug["hsv_p"]))
     if aug.get("blur_noise_p", 0) > 0:
         steps.append(A.OneOf([A.GaussianBlur(blur_limit=(3, 3)), A.GaussNoise()], p=aug["blur_noise_p"]))
+
+    # ---- ablation-only steps (geometric, then photometric, then occlusion) ---- #
+    def p(key: str) -> float:
+        return float(aug.get(key, 0) or 0)
+
+    if p("elastic_p") > 0:       # local warping of the crack path (masks use nearest-neighbour)
+        steps.append(_transform(A.ElasticTransform, p("elastic_p"), {"alpha": 30.0, "sigma": 5.0}))
+    if p("grid_distortion_p") > 0:
+        steps.append(_transform(A.GridDistortion, p("grid_distortion_p"), {"num_steps": 5, "distort_limit": 0.2}))
+    if p("perspective_p") > 0:   # oblique views
+        steps.append(_transform(A.Perspective, p("perspective_p"), {"scale": (0.02, 0.06)}))
+    if p("clahe_p") > 0:         # local contrast
+        steps.append(_transform(A.CLAHE, p("clahe_p"), {"clip_limit": (1.0, 3.0), "tile_grid_size": (8, 8)}))
+    if p("gamma_p") > 0:
+        steps.append(_transform(A.RandomGamma, p("gamma_p"), {"gamma_limit": (80, 120)}))
+    if p("shadow_p") > 0:        # cast shadows anywhere in the crop (the default only uses the lower half)
+        steps.append(_transform(A.RandomShadow, p("shadow_p"), {"shadow_roi": (0, 0, 1, 1)}))
+    if p("gray_p") > 0:
+        steps.append(_transform(A.ToGray, p("gray_p")))
+    if p("sharpen_p") > 0:
+        steps.append(_transform(A.Sharpen, p("sharpen_p"), {"alpha": (0.1, 0.3), "lightness": (0.8, 1.2)}))
+    if p("motion_blur_p") > 0:   # drone / camera motion
+        steps.append(_transform(A.MotionBlur, p("motion_blur_p"), {"blur_limit": (3, 7)}))
+    if p("downscale_p") > 0:     # lower ground sampling distance: down- and up-sample
+        steps.append(_transform(A.Downscale, p("downscale_p"), {"scale_range": (0.5, 0.9)},
+                                {"scale_min": 0.5, "scale_max": 0.9}))
+    if p("iso_noise_p") > 0:     # camera sensor noise
+        steps.append(_transform(A.ISONoise, p("iso_noise_p"), {"color_shift": (0.01, 0.05), "intensity": (0.1, 0.4)}))
+    if p("jpeg_p") > 0:
+        steps.append(_transform(A.ImageCompression, p("jpeg_p"), {"quality_range": (50, 95)},
+                                {"quality_lower": 50, "quality_upper": 95}))
+    if p("dropout_p") > 0:       # occlusion; the mask is cleared too (a hidden crack is not a crack to find)
+        holes, size = (1, 4), (16, 48)
+        steps.append(_transform(
+            A.CoarseDropout, p("dropout_p"),
+            {"num_holes_range": holes, "hole_height_range": size, "hole_width_range": size, "fill": 0, "fill_mask": 0},
+            {"num_holes_range": holes, "hole_height_range": size, "hole_width_range": size, "fill_value": 0,
+             "mask_fill_value": 0},
+            {"min_holes": holes[0], "max_holes": holes[1], "min_height": size[0], "max_height": size[1],
+             "min_width": size[0], "max_width": size[1], "fill_value": 0, "mask_fill_value": 0}))
     try:
         return A.Compose(steps, seed=seed)
     except TypeError:  # albumentations < 1.4.22 has no seed argument; it uses random / numpy.random

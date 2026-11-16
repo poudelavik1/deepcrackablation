@@ -229,3 +229,32 @@ When the pilot has finished, check that val IoU no longer swings
 ```bash
 EVAL=1 bash slurm/submit.sh --missing --tiers core tier1 tier2
 ```
+
+## 15. Ablation of DeepCrack: augmentation and optimizer
+
+Plan: [configs/ablation/deepcrack.yaml](configs/ablation/deepcrack.yaml). Results go to
+`$RUNS_ROOT/ablation_deepcrack/<variant>/seed_<n>/`; every training task also evaluates its run on
+val, so no separate evaluation job is needed. One run is ~1.1 h, and the cluster runs one job at a time.
+
+| Stage | What runs | Runs | Time |
+|---|---|---|---|
+| 1 `screen` | reference (benchmark protocol) x seeds 0 1 2; 9 optimizers x 3 learning rates; 24 augmentation changes (none, leave-one-out, stronger, 14 added steps, CutMix), each seed 0 | 53 | ~2.5 days |
+| 2 `combine` | best optimizer + top-1 / top-3 / all augmentation changes that beat the reference by the margin (0.003, or the reference seed std if larger) | <= 4 | ~4 h |
+| 3 `final` | seeds 1 2 for the 2 best candidates; the best over 3 seeds vs. the reference (Wilcoxon on per-tile val IoU) is the final recipe | <= 4 | ~4 h |
+
+```bash
+git pull
+bash slurm/ablation.sh check          # every variant builds (CPU, ~1 min); `screen` runs it too
+bash slurm/ablation.sh screen         # stage 1
+bash slurm/ablation.sh report         # any time: tables, figures, decisions, and the next command to run
+bash slurm/ablation.sh combine        # when stage 1 is done (it refuses earlier)
+bash slurm/ablation.sh final          # when stage 2 is done
+bash slurm/ablation.sh test           # ONCE at the very end: final recipe + reference on the test set
+python scripts/progress.py --protocol ablation_deepcrack     # per-run progress
+```
+
+Resubmitting a stage queues only the runs that are not finished and evaluated, so after a time-out
+just run the same command again. To trim stage 1: `bash slurm/ablation.sh screen --only ref 'aug_*'`.
+`report` writes `tables/ablation_deepcrack_{report.txt,optimizer,augmentation,final}.*`,
+`figures/ablation_deepcrack_{optimizers,augmentation}.{png,pdf}` and the winning config to
+`$RUNS_ROOT/ablation_deepcrack/FINAL.yaml` (its differences from the benchmark are listed in the report).

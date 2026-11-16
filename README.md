@@ -2,7 +2,8 @@
 
 Baseline benchmark for binary concrete-crack segmentation (crack vs background, many
 cracks 1-4 px wide) on tiles of drone orthomosaics. Its purpose is to **select one
-model**; ablation studies come later and are added as configs, not code.
+model**; ablation studies are added as configs, not code (the DeepCrack augmentation x optimizer
+ablation: `configs/ablation/deepcrack.yaml`, run with `slurm/ablation.sh`, see SERVER_GUIDE.md section 15).
 
 Code only: the dataset, checkpoints and results are never committed.
 Running on the cluster: see [SERVER_GUIDE.md](SERVER_GUIDE.md).
@@ -73,6 +74,7 @@ config.py        YAML loading (base + per-model override + --set key=value)
 data.py          tile pairs, augmentation, loaders
 models/          registry.py + one file per non-smp model
 losses.py        BCE+Dice (benchmark), HairlineCrackLoss (original recipe)
+optimizers.py    optimizer by name (train.optimizer; AdamW in the benchmark, Lion implemented here)
 metrics.py       all metrics (numpy)
 engine.py        seeding, EMA, whole-tile and sliding-window prediction
 train.py         one (model, seed) run; resumable; skips finished runs
@@ -80,7 +82,7 @@ evaluate.py      val / test metrics, per-tile CSV, curves, efficiency
 results.py       loads result files (pandas only)
 plots.py         figures 1-8
 make_report.py   tables (CSV + LaTeX), ranking, significance, figures
-configs/         base.yaml, <model>.yaml, original/<model>.yaml
+configs/         base.yaml, <model>.yaml, original/<model>.yaml, ablation/<model>.yaml (ablation plans)
 scripts/         dataset inspection, env check, weights, job list, smoke test, Tier 2 installers
 slurm/           array job, evaluation, smoke test, nnU-Net, SCSegamba
 ```
