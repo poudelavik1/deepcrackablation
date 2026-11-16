@@ -9,10 +9,13 @@
 #   bash slurm/ablation.sh test       # ONCE, at the very end: final recipe + reference on the test set
 #
 # Every training task also evaluates its run on val. Resubmitting a stage only queues runs that are
-# not finished and evaluated yet, so it is always safe (e.g. after a time-out).
+# not finished and evaluated yet, and leaves out runs written to in the last 30 min (running now),
+# so it is always safe (e.g. after a time-out).
+#   PACK=2 bash slurm/ablation.sh screen                  # 2 runs at once per GPU job (1-job-per-user limit)
 #   DRY_RUN=1 bash slurm/ablation.sh screen               # print the job list, submit nothing
 #   bash slurm/ablation.sh screen --only 'opt_*' ref      # a subset of variants (globs)
 #   PLAN=configs/ablation/<model>.yaml bash slurm/ablation.sh ...   # another model's plan
+# With PACK=n a job asks for n x CPUS_PER_RUN CPUs (default 8) and n x MEM_PER_RUN_GB memory (default 24).
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -20,9 +23,10 @@ cd "$(dirname "$0")/.."
 source slurm/env.sh
 export PATH="$ENV_DIR/bin:$PATH"
 STAGE="${1:-}"
-[ -n "$STAGE" ] || { sed -n '2,16p' "$0"; exit 1; }
+[ -n "$STAGE" ] || { sed -n '2,18p' "$0"; exit 1; }
 shift
 PLAN="${PLAN:-configs/ablation/deepcrack.yaml}"
+PACK="${PACK:-1}"
 ABLATION=(python scripts/ablation.py --plan "$PLAN" --runs-root "$RUNS_ROOT")
 
 case "$STAGE" in
@@ -39,20 +43,33 @@ if [ "$COUNT" -eq 0 ]; then
     echo "Nothing to submit for stage '$STAGE'."
     exit 0
 fi
-echo "Job list: $JOBLIST ($COUNT tasks, at most ${MAX_PARALLEL:-4} at once)"
-[ "${DRY_RUN:-0}" = "1" ] && exit 0
 
-export JOBLIST
+export JOBLIST PLAN
 if [ "$STAGE" = "test" ]; then
+    echo "Job list: $JOBLIST ($COUNT evaluations)"
+    [ "${DRY_RUN:-0}" = "1" ] && exit 0
     JOB_ID=$(sbatch --parsable --partition="$PARTITION" --export=ALL ${SBATCH_ARGS:-} slurm/ablation_test.sbatch)
     echo "Submitted test evaluation job ${JOB_ID%%;*}: logs/ablation_test_${JOB_ID%%;*}.out"
     exit 0
 fi
-export TRAIN_ARGS="${TRAIN_ARGS:-}" EVAL_AFTER=1
-JOB_ID=$(sbatch --parsable --job-name=ablation --partition="$PARTITION" \
-    --array="0-$((COUNT - 1))%${MAX_PARALLEL:-4}" --export=ALL ${SBATCH_ARGS:-} slurm/train_array.sbatch)
+
+TASKS=$(( (COUNT + PACK - 1) / PACK ))
+RESOURCES=""
+if [ "$PACK" -gt 1 ]; then
+    RESOURCES="--cpus-per-task=$(( ${CPUS_PER_RUN:-8} * PACK )) --mem=$(( ${MEM_PER_RUN_GB:-24} * PACK ))G"
+fi
+echo "Job list: $JOBLIST ($COUNT runs in $TASKS array tasks, $PACK per task${RESOURCES:+: $RESOURCES})"
+[ "${DRY_RUN:-0}" = "1" ] && exit 0
+
+export PACK TRAIN_ARGS="${TRAIN_ARGS:-}" EVAL_AFTER=1
+JOB_ID=$(sbatch --parsable --job-name=ablation --partition="$PARTITION" $RESOURCES \
+    --array="0-$((TASKS - 1))%${MAX_PARALLEL:-4}" --export=ALL ${SBATCH_ARGS:-} slurm/train_array.sbatch)
 JOB_ID="${JOB_ID%%;*}"
 echo "Submitted array job $JOB_ID (stage $STAGE)"
-echo "  monitor : squeue -u $USER  |  python scripts/progress.py --runs-root $RUNS_ROOT --protocol ablation_deepcrack"
-echo "  logs    : tail -f logs/ablation_${JOB_ID}_0.out"
+echo "  monitor : squeue -u ${USER:-$(id -un)}  |  python scripts/progress.py --runs-root $RUNS_ROOT --protocol ablation_deepcrack"
+if [ "$PACK" -gt 1 ]; then
+    echo "  logs    : logs/ablation_${JOB_ID}_<task>.out (GPU load) and logs/ablation_${JOB_ID}_<task>.<run>.out (one per run)"
+else
+    echo "  logs    : tail -f logs/ablation_${JOB_ID}_0.out"
+fi
 echo "  then    : bash slurm/ablation.sh report     (prints the next step)"

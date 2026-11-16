@@ -31,6 +31,7 @@ import fnmatch
 import json
 import math
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ DEFAULT_PLAN = REPO_ROOT / "configs" / "ablation" / "deepcrack.yaml"
 STAGES = ("screen", "combine", "final", "test")
 NOT_RECIPE = ("protocol", "run_name", "ablation", "seed", "model_info")   # keys that do not change training
 REFERENCE = "ref"
+ACTIVE_MINUTES = 30      # a run written to more recently than this is taken to be running (not queued again)
 
 
 def lr_text(lr: float) -> str:
@@ -164,6 +166,13 @@ class Plan:
         """Trained and evaluated on val."""
         run = self.run_dir(name, seed)
         return (run / "FINISHED").exists() and (run / "eval" / "val_metrics.json").exists()
+
+    def active(self, name: str, seed: int) -> bool:
+        """Not done, but a file of the run changed in the last ACTIVE_MINUTES: most likely a job is training
+        or evaluating it right now, and a second job on the same folder would corrupt it."""
+        run = self.run_dir(name, seed)
+        times = [p.stat().st_mtime for p in run.rglob("*") if p.is_file()] if run.is_dir() else []
+        return bool(times) and time.time() - max(times) < ACTIVE_MINUTES * 60
 
 
 # --------------------------------------------------------------------------- #
@@ -385,8 +394,9 @@ def recipe_diff(config: dict[str, Any], base: dict[str, Any], prefix: str = "") 
 # --------------------------------------------------------------------------- #
 # Jobs
 # --------------------------------------------------------------------------- #
-def jobs(plan: Plan, stage: str, only: list[str], allow_incomplete: bool) -> list[tuple[str, int, Path]]:
-    """(variant, seed, config path) to run, without finished + evaluated runs."""
+def jobs(plan: Plan, stage: str, only: list[str], allow_incomplete: bool,
+         include_active: bool = False) -> list[tuple[str, int, Path]]:
+    """(variant, seed, config path) to run, without finished + evaluated runs and runs in progress."""
     runs = read_runs(plan) if stage != "screen" else None
     entries: list[tuple[int, str, int, dict[str, Any] | Path]] = []   # (priority, name, seed, config)
 
@@ -446,6 +456,11 @@ def jobs(plan: Plan, stage: str, only: list[str], allow_incomplete: bool) -> lis
     out, written = [], set()
     for _, name, seed, config in entries:
         if plan.done(name, seed):
+            continue
+        if not include_active and plan.active(name, seed):
+            print(f"skip {name} seed {seed}: written to in the last {ACTIVE_MINUTES} min, so probably running now "
+                  "(it will be queued by a later resubmission if it fails; --include-active queues it anyway)",
+                  file=sys.stderr)
             continue
         path = plan.config_dir / f"{name}.yaml"
         if name not in written:
@@ -764,6 +779,8 @@ def main() -> int:
     parser.add_argument("--only", nargs="*", default=[], help="jobs: keep variants matching these globs, e.g. 'opt_*'")
     parser.add_argument("--allow-incomplete", action="store_true",
                         help="jobs: decide from the runs finished so far (not for the thesis numbers)")
+    parser.add_argument("--include-active", action="store_true",
+                        help=f"jobs: also queue runs written to in the last {ACTIVE_MINUTES} min (normally running)")
     args = parser.parse_args()
 
     runs_root = cfg.runs_root(args.runs_root)
@@ -778,7 +795,7 @@ def main() -> int:
 
     if not args.stage or not args.out:
         parser.error("jobs needs --stage and --out")
-    selected = jobs(plan, args.stage, args.only, args.allow_incomplete)
+    selected = jobs(plan, args.stage, args.only, args.allow_incomplete, args.include_active)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text("".join(f"{n} {s} {p.as_posix()}\n" for n, s, p in selected), encoding="utf-8",
                               newline="\n")

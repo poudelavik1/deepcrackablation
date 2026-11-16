@@ -253,8 +253,20 @@ bash slurm/ablation.sh test           # ONCE at the very end: final recipe + ref
 python scripts/progress.py --protocol ablation_deepcrack     # per-run progress
 ```
 
-Resubmitting a stage queues only the runs that are not finished and evaluated, so after a time-out
-just run the same command again. To trim stage 1: `bash slurm/ablation.sh screen --only ref 'aug_*'`.
+Resubmitting a stage queues only the runs that are not finished and evaluated, and leaves out runs
+written to in the last 30 min (running now), so after a time-out just run the same command again.
+To trim stage 1: `bash slurm/ablation.sh screen --only ref 'aug_*'`.
+
+**Two runs per GPU job.** The account may run one job at a time (`AssocMaxJobsLimit` in `squeue`), and
+one DeepCrack run leaves the A6000 partly idle. `PACK=2` trains two runs side by side in every array
+task (16 CPUs, 48 GB; set `CPUS_PER_RUN` / `MEM_PER_RUN_GB` if the job waits on `Resources`). Each run
+logs to `logs/ablation_<job>_<task>.<run>.out`; the task log records GPU load every 10 min. To switch
+an array that is already queued, cancel only its pending tasks and resubmit (the running run is kept):
+
+```bash
+scancel --state=PENDING <array job id>
+PACK=2 bash slurm/ablation.sh screen
+```
 `report` writes `tables/ablation_deepcrack_{report.txt,optimizer,augmentation,final}.*`,
 `figures/ablation_deepcrack_{optimizers,augmentation}.{png,pdf}` and the winning config to
 `$RUNS_ROOT/ablation_deepcrack/FINAL.yaml` (its differences from the benchmark are listed in the report).
