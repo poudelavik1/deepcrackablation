@@ -100,6 +100,7 @@ class Plan:
         self.screen_seed = int(self.data.get("screen_seed", 0))
         self.final_seeds = [int(s) for s in self.data.get("final_seeds", [1, 2])]
         self.final_candidates = int(self.data.get("final_candidates", 2))
+        self.final_controls = [str(n) for n in self.data.get("final_controls", None) or []]
         self.min_margin = float(self.data.get("margin", 0.003))
         self._screen: list[Variant] | None = None
 
@@ -316,6 +317,19 @@ def final_pool(plan: Plan, runs, decision: Decision) -> tuple[list[dict[str, Any
     return ranked, missing
 
 
+def final_controls(plan: Plan, runs, chosen: list[dict[str, Any]]) -> list[str]:
+    """final_controls of the plan that stage 3 trains too: finished with seed 0, not already a candidate."""
+    taken = {row["variant"].name for row in chosen}
+    names = []
+    for name in plan.final_controls:
+        if name in taken or name == REFERENCE:
+            continue
+        if not math.isfinite(value(runs, name, plan.screen_seed)):
+            raise SystemExit(f"final_controls: {name} has no evaluated seed-{plan.screen_seed} run under {plan.root}")
+        names.append(name)
+    return names
+
+
 def confirmed(plan: Plan, runs) -> list[str]:
     """Variants trained (and evaluated) with every seed of the reference."""
     needed = set(plan.reference_seeds)
@@ -432,6 +446,12 @@ def jobs(plan: Plan, stage: str, only: list[str], allow_incomplete: bool,
                       file=sys.stderr)
                 for seed in plan.final_seeds:
                     entries.append((2, name, seed, run_config(plan, name)))
+            for name in final_controls(plan, runs, chosen):
+                iou = value(runs, name, plan.screen_seed)
+                print(f"control   {name}: seed {plan.screen_seed} val IoU {iou:.4f} "
+                      f"({iou - decision.ref_mean:+.4f}), from final_controls in the plan", file=sys.stderr)
+                for seed in plan.final_seeds:
+                    entries.append((3, name, seed, run_config(plan, name)))
             if not chosen:
                 print("No candidate beats the reference mean with seed 0: the benchmark protocol is the final "
                       "recipe (nothing to confirm).", file=sys.stderr)
@@ -726,6 +746,10 @@ def report(plan: Plan, runs_root: Path) -> int:
         lines += ["", f"Stage 3 pool (seed {plan.screen_seed}, best first; the top {plan.final_candidates} with a "
                   "positive delta get the extra seeds):"]
         lines += [f"  {row['variant'].name:<22} {row['iou']:.4f} ({row['delta']:+.4f})" for row in ranked]
+        chosen = [row for row in ranked if row["delta"] > 0][:plan.final_candidates]
+        for name in final_controls(plan, runs, chosen):
+            iou = value(runs, name, plan.screen_seed)
+            lines.append(f"  {name:<22} {iou:.4f} ({iou - decision.ref_mean:+.4f})  control (final_controls)")
 
     result = final_result(plan, runs)
     next_step = None

@@ -17,6 +17,9 @@ reference_seeds: [0, 1, 2]
 screen_seed: 0
 final_seeds: [1, 2]                # added to seed 0 of each confirmed candidate
 final_candidates: 2                # how many candidates get the extra seeds
+final_controls:                    # stage-1 variants that also get the extra seeds, whatever their rank
+  - opt_adamw_lr1e-4               # (added 2026-11-19) RAdam 1e-4 beat AdamW 1e-4 by only 0.0025 with seed 0:
+                                   # is the gain RAdam's, or the lower lr's? Eligible to win like any candidate.
 margin: 0.003                      # min. val IoU gain over the reference mean to count a change as positive
                                    # (raised to the reference seed std when that is larger)
 hours_per_run: 1.3                 # for the time estimate only (stage 1: 80 epochs x 54 s + val evaluation, A6000)
