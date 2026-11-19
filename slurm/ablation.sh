@@ -11,7 +11,8 @@
 # Every training task also evaluates its run on val. Resubmitting a stage only queues runs that are
 # not finished and evaluated yet, and leaves out runs written to in the last 30 min (running now),
 # so it is always safe (e.g. after a time-out).
-#   PACK=2 bash slurm/ablation.sh screen                  # 2 runs at once per GPU job (1-job-per-user limit)
+#   GPUS=4 bash slurm/ablation.sh final                   # 4 runs at once, one per GPU (4 GPUs: jobs <= 1 day)
+#   PACK=2 bash slurm/ablation.sh screen                  # 2 runs at once sharing one GPU (no faster for DeepCrack)
 #   DRY_RUN=1 bash slurm/ablation.sh screen               # print the job list, submit nothing
 #   bash slurm/ablation.sh screen --only 'opt_*' ref      # a subset of variants (globs)
 #   PLAN=configs/ablation/<model>.yaml bash slurm/ablation.sh ...   # another model's plan
@@ -24,10 +25,11 @@ cd "$(dirname "$0")/.."
 source slurm/env.sh
 export PATH="$ENV_DIR/bin:$PATH"
 STAGE="${1:-}"
-[ -n "$STAGE" ] || { sed -n '2,19p' "$0"; exit 1; }
+[ -n "$STAGE" ] || { sed -n '2,20p' "$0"; exit 1; }
 shift
 PLAN="${PLAN:-configs/ablation/deepcrack.yaml}"
-PACK="${PACK:-1}"
+GPUS="${GPUS:-1}"                 # GPUs per job; with GPUS=n, n runs train at once, one per GPU
+PACK="${PACK:-$GPUS}"             # runs per job (more runs than GPUs share them)
 ABLATION=(python scripts/ablation.py --plan "$PLAN" --runs-root "$RUNS_ROOT")
 
 # One waiting array at a time: a second one would queue the same runs again, and the older one
@@ -76,6 +78,9 @@ TASKS=$(( (COUNT + PACK - 1) / PACK ))
 RESOURCES=""
 if [ "$PACK" -gt 1 ]; then
     RESOURCES="--cpus-per-task=$(( ${CPUS_PER_RUN:-8} * PACK )) --mem=$(( ${MEM_PER_RUN_GB:-24} * PACK ))G"
+fi
+if [ "$GPUS" -gt 1 ]; then
+    RESOURCES="$RESOURCES --gres=gpu:$GPUS"
 fi
 echo "Job list: $JOBLIST ($COUNT runs in $TASKS array tasks, $PACK per task${RESOURCES:+: $RESOURCES})"
 [ "${DRY_RUN:-0}" = "1" ] && exit 0

@@ -6,9 +6,10 @@
 # Task k trains line k of $JOBLIST ("name seed config"). A finished run is skipped and
 # an interrupted one resumes from last.pt, so resubmitting the same list is always safe.
 #
-# PACK=n (slurm/ablation.sh): task k trains lines k*n .. k*n+n-1 AT THE SAME TIME on its one GPU,
-# each with 1/n of the task's CPUs as DataLoader workers and its own log
-# logs/<job name>_<array id>_<task>.<name>_s<seed>.out. For accounts that may run one job at a time.
+# PACK=n (slurm/ablation.sh): task k trains lines k*n .. k*n+n-1 AT THE SAME TIME, each with 1/n of the
+# task's CPUs as DataLoader workers and its own log logs/<job name>_<array id>_<task>.<name>_s<seed>.out.
+# With n GPUs in the job (GPUS=n) each run gets its own GPU; with one GPU they share it (no faster).
+# For accounts that may run one job at a time.
 #SBATCH --job-name=crackbench
 #SBATCH --partition=ASL-gpu          # <PARTITION> (slurm/submit.sh overrides it from slurm/env.sh)
 #SBATCH --nodes=1
@@ -55,6 +56,9 @@ if [ "$PACK" -le 1 ]; then
 else
     WORKERS=$(( ${SLURM_CPUS_PER_TASK:-8} / PACK ))
     [ "$WORKERS" -ge 1 ] || WORKERS=1
+    # The GPUs Slurm gave this job (e.g. "0,1,2,3" with --gres=gpu:4). With as many GPUs as lanes every
+    # run gets its own GPU (GPUS=n in slurm/ablation.sh); with fewer, lanes share them in turn.
+    IFS=, read -r -a JOB_GPUS <<< "${CUDA_VISIBLE_DEVICES:-}"
     PIDS=()
     for LANE in $(seq 0 $((PACK - 1))); do
         NUMBER=$((FIRST + LANE))
@@ -62,8 +66,13 @@ else
         [ -n "$LINE" ] || continue                  # the last task of a list may have fewer lines
         read -r NAME SEED _ <<< "$LINE"
         LOG="logs/${SLURM_JOB_NAME:-job}_${SLURM_ARRAY_JOB_ID:-0}_${SLURM_ARRAY_TASK_ID}.${NAME}_s${SEED}.out"
-        echo "lane $LANE : $NAME seed $SEED, $WORKERS workers -> $LOG"
-        run_line "$NUMBER" "$WORKERS" > "$LOG" 2>&1 &
+        GPU=""
+        if [ "${#JOB_GPUS[@]}" -gt 0 ]; then GPU="${JOB_GPUS[$((LANE % ${#JOB_GPUS[@]}))]}"; fi
+        echo "lane $LANE : $NAME seed $SEED, GPU ${GPU:-default}, $WORKERS workers -> $LOG"
+        (
+            if [ -n "$GPU" ]; then export CUDA_VISIBLE_DEVICES="$GPU"; fi
+            run_line "$NUMBER" "$WORKERS"
+        ) > "$LOG" 2>&1 &
         PIDS+=($!)
         sleep 20                                    # stagger the start (dataset scan, model build)
     done

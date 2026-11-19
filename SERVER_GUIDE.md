@@ -257,6 +257,8 @@ Resubmitting a stage queues only the runs that are not finished and evaluated, a
 written to in the last 30 min (running now), so after a time-out just run the same command again.
 To trim stage 1: `bash slurm/ablation.sh screen --only ref 'aug_*'`.
 
+**Several GPUs per job.** The cluster allows up to 4 GPUs for jobs of one day or less. `GPUS=4 bash slurm/ablation.sh final` trains 4 runs at once, each on its own GPU (32 CPUs, 96 GB), about 4x faster than one run after another. Without free GPUs on one node the job waits (`gpufree` shows them).
+
 **Two runs per GPU job.** The account may run one job at a time (`AssocMaxJobsLimit` in `squeue`), and
 one DeepCrack run leaves the A6000 partly idle. `PACK=2` trains two runs side by side in every array
 task (16 CPUs, 48 GB; set `CPUS_PER_RUN` / `MEM_PER_RUN_GB` if the job waits on `Resources`). Each run
