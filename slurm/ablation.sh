@@ -74,6 +74,8 @@ if [ "$STAGE" = "test" ]; then
     exit 0
 fi
 
+[ "$GPUS" -le "$COUNT" ] || GPUS=$COUNT     # never hold (or wait for) more GPUs than there are runs
+[ "$PACK" -le "$COUNT" ] || PACK=$COUNT
 TASKS=$(( (COUNT + PACK - 1) / PACK ))
 RESOURCES=""
 if [ "$PACK" -gt 1 ]; then
