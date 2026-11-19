@@ -238,7 +238,7 @@ val, so no separate evaluation job is needed. One run is ~1.1 h, and the cluster
 
 | Stage | What runs | Runs | Time |
 |---|---|---|---|
-| 1 `screen` | reference (benchmark protocol) x seeds 0 1 2; 9 optimizers x 3 learning rates; 24 augmentation changes (none, leave-one-out, stronger, 14 added steps, CutMix), each seed 0 | 53 | ~2.5 days |
+| 1 `screen` | reference (benchmark protocol) x seeds 0 1 2; 9 optimizers x 3 learning rates (+1 lower lr for RAdam, Adamax, AdamW: grid extension after the first 53 runs); 24 augmentation changes (none, leave-one-out, stronger, 14 added steps, CutMix), each seed 0 | 56 | ~3 days |
 | 2 `combine` | best optimizer + top-1 / top-3 / all augmentation changes that beat the reference by the margin (0.003, or the reference seed std if larger) | <= 4 | ~4 h |
 | 3 `final` | seeds 1 2 for the 2 best candidates; the best over 3 seeds vs. the reference (Wilcoxon on per-tile val IoU) is the final recipe | <= 4 | ~4 h |
 

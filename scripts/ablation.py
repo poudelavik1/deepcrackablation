@@ -244,10 +244,12 @@ def decide(plan: Plan, runs) -> Decision:
         for lr in lrs:
             variant = next((v for v in optimizers if v.optimizer == name and v.lr == lr), None)
             points.append(ref_mean if variant is None else value(runs, variant.name, plan.screen_seed))
-        if all(math.isfinite(p) for p in points) and len(points) >= 3:
+        if all(math.isfinite(p) for p in points) and len(points) >= 2:
             best_index = max(range(len(points)), key=points.__getitem__)
-            # Only a clear slope towards the edge counts (a flat curve picks an edge by noise).
-            if best_index in (0, len(points) - 1) and points[best_index] - points[len(points) // 2] >= margin:
+            # Only a clear slope towards the edge counts (a flat curve picks an edge by noise): the edge
+            # point must beat its neighbour in the grid by the margin.
+            neighbour = points[1] if best_index == 0 else points[-2]
+            if best_index in (0, len(points) - 1) and points[best_index] - neighbour >= margin:
                 side = "lowest" if best_index == 0 else "highest"
                 edge_notes.append(f"{plan.optimizer_label(name)}: best at the {side} lr of the grid "
                                   f"({lr_text(lrs[best_index])}); its optimum may lie outside the grid")
@@ -521,7 +523,7 @@ def check(plan: Plan) -> int:
 # --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
-SEQUENTIAL = ["#A6CEE3", "#4A90C2", "#08306B"]           # low / middle / high lr of a grid (one hue)
+LINE, BEST = "#4A90C2", "#08306B"                           # lr sweep line, its best point (one hue)
 BETTER, WORSE, NEUTRAL = "#0072B2", "#D55E00", "#9E9E9E"   # Okabe-Ito blue / vermillion, grey = within noise
 BAND = "#E8E8E8"                                            # +- margin band behind the marks
 
@@ -531,8 +533,7 @@ def optimizer_table(plan: Plan, runs, decision: Decision):
 
     rows = []
     for name, spec in (plan.data.get("optimizers") or {}).items():
-        lrs = [float(x) for x in spec["lrs"]]
-        for index, lr in enumerate(lrs):
+        for lr in [float(x) for x in spec["lrs"]]:
             variant = next((v for v in plan.screen_variants() if v.optimizer == name and v.lr == lr), None)
             if variant is None:       # the reference grid point: the reference mean over its seeds
                 subset = runs[runs["variant"] == REFERENCE]
@@ -545,7 +546,7 @@ def optimizer_table(plan: Plan, runs, decision: Decision):
                 epoch = subset["best_epoch"].iloc[0] if len(subset) else None
             rows.append({"optimizer": plan.optimizer_label(name), "lr": lr_text(lr), "variant": row_name,
                          "val_iou": iou, "delta_iou": iou - decision.ref_mean, "val_f1": f1, "best_epoch": epoch,
-                         "grid_position": 0 if index == 0 else (2 if index == len(lrs) - 1 else 1)})
+                         "lr_value": lr})
     return pd.DataFrame(rows)
 
 
@@ -588,37 +589,45 @@ def figure_optimizers(plan: Plan, table, decision: Decision, out: Path) -> Path 
     table = table.dropna(subset=["val_iou"])
     if table.empty:
         return None
-    order = table.groupby("optimizer", sort=False)["val_iou"].max().sort_values().index.tolist()   # best on top
+    # One panel per optimizer, val IoU against lr; best optimizer first (top left), all on one y scale.
+    order = table.groupby("optimizer", sort=False)["val_iou"].max().sort_values(ascending=False).index.tolist()
+    columns = 3
+    rows = math.ceil(len(order) / columns)
     plots.setup()
-    figure, axis = plt.subplots(figsize=(6.2, 0.42 * len(order) + 1.1))
-    if math.isfinite(decision.ref_mean):
-        axis.axvspan(decision.ref_mean - decision.margin, decision.ref_mean + decision.margin, color=BAND,
-                     linewidth=0, zorder=0)
-        axis.axvline(decision.ref_mean, color="black", linewidth=0.8, linestyle="--", zorder=1)
-    for row_index, optimizer in enumerate(order):
-        points = table[table["optimizer"] == optimizer].reset_index(drop=True)
-        axis.plot([points["val_iou"].min(), points["val_iou"].max()], [row_index, row_index], color="#888888",
-                  linewidth=1.0, zorder=2)
-        for _, point in points.iterrows():
-            shade = SEQUENTIAL[int(point["grid_position"])]
-            axis.plot(point["val_iou"], row_index, "o", markersize=7, color=shade, markeredgecolor="black",
-                      markeredgewidth=0.6, zorder=3)
-        best = points.loc[points["val_iou"].idxmax()]     # the rightmost point: the label goes right of it
-        axis.annotate(f"lr {best['lr']}", (best["val_iou"], row_index), xytext=(7, 0), textcoords="offset points",
-                      ha="left", va="center", fontsize=7.5, color="#444444", zorder=4,
-                      bbox={"boxstyle": "round,pad=0.15", "facecolor": "white", "edgecolor": "none", "alpha": 0.9})
-    axis.set_yticks(range(len(order)), order)
-    axis.set_ylim(-0.6, len(order) - 0.2)
-    low, high = axis.get_xlim()
-    axis.set_xlim(low, high + 0.12 * (high - low))     # room for the lr labels right of the best points
-    axis.set_xlabel(f"Val IoU (seed {plan.screen_seed}, threshold chosen on val)")
-    axis.grid(axis="y", visible=False)
-    handles = [Line2D([], [], marker="o", linestyle="none", markersize=7, color=c, markeredgecolor="black",
-                      markeredgewidth=0.6) for c in SEQUENTIAL]
-    labels = ["lowest lr of the grid", "middle lr", "highest lr"]
-    handles += [Line2D([], [], color="black", linestyle="--", linewidth=0.8), Patch(color=BAND)]
-    labels += [f"reference mean ({decision.ref_n} seeds)", f"± margin {decision.margin:.3f}"]
-    axis.legend(handles, labels, loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False, borderaxespad=0)
+    figure, axes = plt.subplots(rows, columns, sharey=True, figsize=(7.0, 2.0 * rows + 0.6), squeeze=False)
+    for index, axis in enumerate(axes.flat):
+        if index >= len(order):
+            axis.set_visible(False)
+            continue
+        optimizer = order[index]
+        points = table[table["optimizer"] == optimizer].sort_values("lr_value")
+        if math.isfinite(decision.ref_mean):
+            axis.axhspan(decision.ref_mean - decision.margin, decision.ref_mean + decision.margin, color=BAND,
+                         linewidth=0, zorder=0)
+            axis.axhline(decision.ref_mean, color="black", linewidth=0.8, linestyle="--", zorder=1)
+        axis.plot(points["lr_value"], points["val_iou"], "-o", color=LINE, linewidth=1.5, markersize=5,
+                  markeredgecolor="white", markeredgewidth=0.8, zorder=2)
+        best = points.loc[points["val_iou"].idxmax()]
+        axis.plot(best["lr_value"], best["val_iou"], "o", color=BEST, markersize=7.5, markeredgecolor="white",
+                  markeredgewidth=0.8, zorder=3)
+        axis.set_xscale("log")
+        axis.set_xticks(points["lr_value"].tolist(), points["lr"].tolist(), fontsize=7.5)
+        axis.minorticks_off()
+        low, high = points["lr_value"].min(), points["lr_value"].max()
+        axis.set_xlim(low / 1.8, high * 1.8)
+        axis.set_title(f"{optimizer}  (best {best['val_iou']:.4f})", fontsize=8.5)
+        axis.grid(axis="x", visible=False)
+    top, bottom = table["val_iou"].max(), table["val_iou"].min()
+    axes.flat[0].set_ylim(bottom - 0.06 * (top - bottom), top + 0.10 * (top - bottom))   # shared: room above the best
+    figure.supxlabel("Learning rate (log scale)", fontsize=9, y=0.055)
+    figure.supylabel(f"Val IoU (seed {plan.screen_seed}, threshold chosen on val)", fontsize=9)
+    figure.subplots_adjust(hspace=0.55, wspace=0.12, bottom=0.115)
+    handles = [Line2D([], [], color=LINE, marker="o", markersize=5, linewidth=1.5, markeredgecolor="white"),
+               Line2D([], [], color=BEST, marker="o", linestyle="none", markersize=7.5, markeredgecolor="white"),
+               Line2D([], [], color="black", linestyle="--", linewidth=0.8), Patch(color=BAND)]
+    labels = ["one run per lr", "best lr of the optimizer", f"reference mean ({decision.ref_n} seeds)",
+              f"± margin {decision.margin:.3f}"]
+    figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.035), ncol=4, frameon=False)
     name = f"{plan.protocol}_optimizers"
     plots.save(figure, out, name)
     return out / f"{name}.png"
@@ -682,7 +691,7 @@ def report(plan: Plan, runs_root: Path) -> int:
     runs.to_csv(tables / f"{plan.protocol}_runs.csv", index=False, encoding="utf-8-sig")
     optimizers = optimizer_table(plan, runs, decision)
     augmentation = augmentation_table(plan, runs, decision)
-    write_table(optimizers.round(4), tables, f"{plan.protocol}_optimizer",
+    write_table(optimizers.drop(columns="lr_value").round(4), tables, f"{plan.protocol}_optimizer",
                 f"{plan.model}: optimizers and learning rates (val IoU, seed {plan.screen_seed}; reference "
                 f"= mean of {decision.ref_n} seeds)")
     write_table(augmentation.round(4), tables, f"{plan.protocol}_augmentation",
