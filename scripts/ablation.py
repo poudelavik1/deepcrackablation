@@ -368,15 +368,47 @@ def final_result(plan: Plan, runs) -> dict[str, Any] | None:
     return result
 
 
-def per_tile_iou(plan: Plan, names: list[str]):
-    """Per-tile val IoU averaged over the reference seeds: rows = tiles, columns = variants."""
+def test_result(plan: Plan, names: list[str]) -> dict[str, Any] | None:
+    """Test-set metrics (threshold chosen on val) of these variants over the reference seeds, once all exist."""
+    import numpy as np
+    import pandas as pd
+
+    rows = []
+    for name in names:
+        for seed in plan.reference_seeds:
+            path = plan.run_dir(name, seed) / "eval" / "test_metrics.json"
+            if not path.exists():
+                return None
+            result = json.loads(path.read_text(encoding="utf-8"))
+            values = result["metrics"]
+            rows.append({"variant": name, "seed": seed, "iou": values["iou"], "f1": values["f1"],
+                         "precision": values["precision"], "recall": values["recall"],
+                         "tol_f1_2": values.get("tol_f1_2"), "ap": result.get("ap"), "threshold": result.get("threshold")})
+    runs = pd.DataFrame(rows)
+    out = {"runs": runs, "p_value": float("nan"), "median_tile_diff": float("nan"), "seed_diffs": []}
+    if len(names) == 2:
+        first, second = names
+        out["seed_diffs"] = [float(runs[(runs.variant == first) & (runs.seed == s)].iou.iloc[0]
+                                   - runs[(runs.variant == second) & (runs.seed == s)].iou.iloc[0])
+                             for s in plan.reference_seeds]
+        tiles = per_tile_iou(plan, names, split="test")
+        if len(tiles) >= 6 and not np.allclose(tiles[first], tiles[second]):
+            from scipy.stats import wilcoxon
+
+            out["p_value"] = float(wilcoxon(tiles[first], tiles[second], zero_method="wilcox").pvalue)
+            out["median_tile_diff"] = float((tiles[first] - tiles[second]).median())
+    return out
+
+
+def per_tile_iou(plan: Plan, names: list[str], split: str = "val"):
+    """Per-tile IoU of a split averaged over the reference seeds: rows = tiles, columns = variants."""
     import pandas as pd
 
     columns = {}
     for name in names:
         frames = []
         for seed in plan.reference_seeds:
-            path = plan.run_dir(name, seed) / "eval" / "val_per_tile.csv"
+            path = plan.run_dir(name, seed) / "eval" / f"{split}_per_tile.csv"
             if path.exists():
                 frames.append(pd.read_csv(path).set_index("name")["iou"])
         if frames:
@@ -783,6 +815,27 @@ def report(plan: Plan, runs_root: Path) -> int:
         lines += ["  changes from the benchmark protocol:"]
         lines += [f"    {line}" for line in recipe_diff(config, plan.base)] or ["    none"]
         next_step = "bash slurm/ablation.sh test   (once: final recipe and reference on the test set)"
+        test = test_result(plan, list(dict.fromkeys([winner, REFERENCE])))
+        if test is not None:
+            test_runs = test["runs"]
+            summary = test_runs.groupby("variant", sort=False).agg(
+                n_seeds=("iou", "size"), test_iou=("iou", "mean"), test_iou_std=("iou", "std"), test_f1=("f1", "mean"),
+                tol_f1_2=("tol_f1_2", "mean"), test_precision=("precision", "mean"),
+                test_recall=("recall", "mean"), test_ap=("ap", "mean")).reset_index()
+            write_table(summary.round(4), tables, f"{plan.protocol}_test",
+                        f"{plan.model}: final recipe and reference on the test set over seeds {plan.reference_seeds} "
+                        "(threshold chosen on val)")
+            lines += ["", f"Test set (once, threshold chosen on val, seeds {plan.reference_seeds}):"]
+            for row in summary.itertuples():
+                per_seed = ", ".join(f"{v:.4f}" for v in test_runs[test_runs.variant == row.variant].iou)
+                lines.append(f"  {row.variant:<22} IoU {row.test_iou:.4f} ± {row.test_iou_std:.4f}  F1 {row.test_f1:.4f}  "
+                             f"P {row.test_precision:.4f}  R {row.test_recall:.4f}  (seeds: {per_seed})")
+            if test["seed_diffs"]:
+                gain = float(summary.test_iou.iloc[0] - summary.test_iou.iloc[1])
+                lines.append(f"  -> {winner} vs reference on test: {gain:+.4f} IoU; per seed "
+                             + ", ".join(f"{d:+.4f}" for d in test["seed_diffs"])
+                             + f"; Wilcoxon on per-tile IoU p = {test['p_value']:.3g}")
+            next_step = "done (the test set has been used; do not tune further on it)"
     elif decision.missing:
         next_step = "wait for stage 1, then: bash slurm/ablation.sh combine"
     elif any(not plan.done(v.name, plan.screen_seed) for v in combos):
